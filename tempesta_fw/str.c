@@ -20,29 +20,27 @@
 
 #include <linux/kernel.h>
 #include <linux/ctype.h>
+#include "lib.h"
 #include "str.h"
 
-#ifndef DEBUG
-#define validate_tfw_str(str)
-#define validate_cstr(cstr, len)
-#define validate_key(key, len)
-#else
 
 static void
 validate_tfw_str(const TfwStr *str)
 {
-	const TfwStr *chunk;
-
 	BUG_ON(!str);
 	BUG_ON(str->flags & TFW_STR_COMPOUND2);  /* Not supported yet. */
 
-	TFW_STR_FOR_EACH_CHUNK (chunk, str) {
-		BUG_ON(!chunk);
-		BUG_ON(chunk->len && !chunk->ptr);
+	IF_DEBUG {
+		const TfwStr *chunk;
 
-		/* The flag is not allowed for chunks.
-		 * It must be set only for their parent TfwStr object. */
-		BUG_ON(chunk->flags & TFW_STR_COMPOUND);
+		TFW_STR_FOR_EACH_CHUNK (chunk, str) {
+			BUG_ON(!chunk);
+			BUG_ON(chunk->len && !chunk->ptr);
+
+			/* The flag is not allowed for chunks.
+			 * It must be set only for their parent TfwStr. */
+			BUG_ON(chunk->flags & TFW_STR_COMPOUND);
+		}
 	}
 }
 
@@ -57,11 +55,14 @@ validate_cstr(const char *cstr, unsigned int len)
 	 *    perhaps an error code (the negative value) was used as an
 	 *    unsigned integer.
 	 */
-	int i;
-	for (i = 0; i < len; ++i)
-		BUG_ON(iscntrl(cstr[i]) || !isascii(cstr[i]));
-	BUG_ON(strnlen(cstr, len) != len);
 	BUG_ON(len >= (1<<16));
+
+	IF_DEBUG {
+		int i;
+		for (i = 0; i < len; ++i)
+			BUG_ON(iscntrl(cstr[i]) || !isascii(cstr[i]));
+		BUG_ON(strnlen(cstr, len) != len);
+	}
 }
 
 static void
@@ -72,14 +73,15 @@ validate_key(const char *key, int len)
 	 *  - It should not contain spaces (or tokenization would be tricky).
 	 *  - Expected length won't exceed 256 characters.
 	 */
-	int i;
-	for (i = 0; i < len; ++i)
-		BUG_ON(isspace(key[i]));
 	BUG_ON(len >= (1<<8));
-	validate_cstr(key, len);
-}
 
-#endif /* ifndef DEBUG */
+	IF_DEBUG {
+		int i;
+		for (i = 0; i < len; ++i)
+			BUG_ON(isspace(key[i]));
+		validate_cstr(key, len);
+	}
+}
 
 /**
  * Add compound piece to @str and return pointer to the piece.

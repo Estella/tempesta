@@ -37,4 +37,14 @@
 #define STRINGIFY(x) _STRINGIFY(x)
 #endif
 
+#ifdef DEBUG
+#define DEBUG_IS_DEFINED 1
+#else
+#define DEBUG_IS_DEFINED 0
+#endif
+
+#define IF_DEBUG if (DEBUG_IS_DEFINED)
+#define IF_NODEBUG if (!DEBUG_IS_DEFINED)
+
+
 #endif /* __TFW_LIB_H__ */

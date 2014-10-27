@@ -27,6 +27,7 @@
 #include "http_match.h"
 #include "http.h"
 #include "lib.h"
+#include "ptrset.h"
 #include "sched.h"
 #include "server.h"
 
@@ -45,26 +46,6 @@ MODULE_LICENSE("GPL");
 #define IP_ADDR_TEXT_BUF_SIZE 	32
 #define RULE_ARG_BUF_SIZE 	255
 
-/**
- * PtrSet is a generic set of pointers implemented by a plain array.
- *
- * In this module it is used for:
- *   - Maintaining a list of all servers added to the scheduler.
- *   - Storing TfwAddr pointers in a parsed rule.
- *   - Storing TfwServer pointers for entries in a matching table.
- *
- * @counter is used only in the third case for round-robin balancing between
- *          the servers.
- * @max is a size of the @ptrs array (and @n is a number of occupied elements).
- */
-typedef struct {
-	atomic_t counter;
-	short n;
-	short max;
-	void *ptrs[0];
-} PtrSet;
-
-#define PTR_SET_SIZE(max) (sizeof(PtrSet) + ((max) * sizeof(void *)))
 
 /**
  * The structure may be used in two forms:
@@ -73,8 +54,8 @@ typedef struct {
  */
 typedef struct {
 	union {
-		PtrSet *servers; /* Contains TfwServer pointers. */
-		PtrSet *addrs;   /* Contains TfwAddr pointers. */
+		TfwPtrSet *servers; /* Contains TfwServer pointers. */
+		TfwPtrSet *addrs;   /* Contains TfwAddr pointers. */
 	};
 	TfwHttpMatchRule rule;
 } MatchEntry;
@@ -108,91 +89,9 @@ DEFINE_SPINLOCK(saved_rules_lock);
  * Allocated once upon module initialization (for fixed amount of servers).
  * Any access must be protected with the added_servers_lock.
  */
-static PtrSet *added_servers;
+static TfwPtrSet *added_servers;
 DEFINE_SPINLOCK(added_servers_lock);
 
-/*
- * --------------------------------------------------------------------------
- *  PtrSet related functions.
- * --------------------------------------------------------------------------
- */
-
-static int
-ptrset_find(const PtrSet *s, const void *ptr)
-{
-	int i;
-
-	BUG_ON(!s || !ptr);
-
-	for (i = 0; i < s->n; ++i) {
-		if (s->ptrs[i] == ptr)
-			return i;
-	}
-
-	return -1;
-}
-
-static int
-ptrset_add(PtrSet *s, void *ptr)
-{
-	BUG_ON(!s || !ptr);
-
-	if (ptrset_find(s, ptr) > 0) {
-		ERR("Can't add ptr %p to set %p - duplicate ptr\n", ptr, s);
-		return -EEXIST;
-	}
-	else if (s->n >= s->max) {
-		ERR("Can't add ptr %p to set %p - set is full\n", ptr, s);
-		return -ENOSPC;
-	}
-
-	s->ptrs[s->n] = ptr;
-	++s->n;
-
-	return 0;
-}
-
-static int
-ptrset_del(PtrSet *s, void *ptr)
-{
-	int i;
-
-	BUG_ON(!s || !ptr);
-
-	i = ptrset_find(s, ptr);
-
-	if (i < 0) {
-		ERR("Can't delete ptr %p from set %p - not found\n", ptr, s);
-		return -ENOENT;
-	}
-
-	s->ptrs[i] = s->ptrs[s->n - 1];
-	s->ptrs[s->n] = NULL;
-	--s->n;
-
-	return 0;
-}
-
-static void *
-ptrset_get_rr(PtrSet *s)
-{
-	unsigned int n, counter;
-	void *ret;
-
-	do {
-		n = s->n;
-		if (!n) {
-			ERR("Can't get a pointer from the empty set: %p\n",
-			       s);
-			return NULL;
-		}
-
-		counter = atomic_inc_return(&s->counter);
-		ret = s->ptrs[counter % n];
-	} while (!ret);
-
-	return ret;
-}
 
 /*
  * --------------------------------------------------------------------------
@@ -204,11 +103,11 @@ ptrset_get_rr(PtrSet *s)
  * Allocate a set of TfwAddr or TfwServer pointers for placing it
  * into a MatchEntry.
  */
-static PtrSet *
+static TfwPtrSet *
 alloc_ptrset(TfwPool *pool)
 {
 	size_t size = PTR_SET_SIZE(MAX_SRV_PER_RULE);
-	PtrSet *servers = tfw_pool_alloc(pool, size);
+	TfwPtrSet *servers = tfw_pool_alloc(pool, size);
 	if (!servers) {
 		ERR("Can't allocate memory from pool: %p\n", pool);
 		return NULL;
@@ -259,7 +158,7 @@ resolve_addr(const TfwAddr *addr)
  * Unresolved addresses are skipped.
  */
 static int
-resolve_addresses(PtrSet *dst_servers, const PtrSet *src_addrs)
+resolve_addresses(TfwPtrSet *dst_servers, const TfwPtrSet *src_addrs)
 {
 	int i, ret;
 	TfwAddr *addr;
@@ -269,7 +168,7 @@ resolve_addresses(PtrSet *dst_servers, const PtrSet *src_addrs)
 		addr = src_addrs->ptrs[i];
 		srv = resolve_addr(addr);
 		if (srv) {
-			ret = ptrset_add(dst_servers, srv);
+			ret = tfw_ptrset_add(dst_servers, srv);
 			if (ret) {
 				ERR("Can't add resolved server: %p\n", srv);
 				return -1;
@@ -398,7 +297,7 @@ tfw_sched_http_get_srv(TfwMsg *msg)
 		entry = tfw_http_match_req_entry((TfwHttpReq * )msg, mlst,
 						 MatchEntry, rule);
 		if (entry)
-			srv = ptrset_get_rr(entry->servers);
+			srv = tfw_ptrset_get_rr(entry->servers);
 	}
 	rcu_read_unlock();
 
@@ -417,7 +316,7 @@ tfw_sched_http_add_srv(TfwServer *srv)
 	DBG("Adding server: %p\n", srv);
 
 	spin_lock_bh(&added_servers_lock);
-	ret = ptrset_add(added_servers, srv);
+	ret = tfw_ptrset_add(added_servers, srv);
 	spin_unlock_bh(&added_servers_lock);
 
 	if (ret)
@@ -436,7 +335,7 @@ tfw_sched_http_del_srv(TfwServer *srv)
 	DBG("Deleting server: %p\n", srv);
 
 	spin_lock_bh(&added_servers_lock);
-	ret = ptrset_del(added_servers, srv);
+	ret = tfw_ptrset_del(added_servers, srv);
 	spin_unlock_bh(&added_servers_lock);
 
 	if (ret)
@@ -700,7 +599,7 @@ parse_addr(ParserState *s)
 	if (ret) {
 		PARSER_ERR(s, "invalid address");
 	} else {
-		ret = ptrset_add(s->entry->addrs, addr);
+		ret = tfw_ptrset_add(s->entry->addrs, addr);
 		if (ret)
 			PARSER_ERR(s, "can't save address");
 	}

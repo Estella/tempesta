@@ -85,6 +85,7 @@ typedef struct {
 	TfwMsg * (*conn_msg_alloc)(TfwConnection *conn);
 } TfwConnHooks;
 
+
 static inline TfwConnection *
 tfw_sess_conn(TfwSession *sess, int type)
 {

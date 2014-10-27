@@ -24,9 +24,17 @@
 #include <linux/in.h>
 #include <linux/in6.h>
 
+#include "addr.h"
+#include "lib.h"
 #include "log.h"
 #include "tempesta.h"
 
+static void
+validate_addr(const TfwAddr *addr)
+{
+	BUG_ON(!addr);
+	WARN_ON(addr->family != AF_INET && addr->family != AF_INET6);
+}
 
 static int
 tfw_inet_pton_ipv4(char **p, struct sockaddr_in *addr)
@@ -196,7 +204,7 @@ tfw_inet_pton_ipv6(char **p, struct sockaddr_in6 *addr)
  * 	   sockaddr_in6.
  */
 int
-tfw_inet_pton(char **p, void *addr)
+tfw_inet_pton(char **p, TfwAddr *addr)
 {
 	int mode = 0;
 
@@ -224,9 +232,9 @@ tfw_inet_pton(char **p, void *addr)
 	}
 
 	if (mode == 4)
-		return tfw_inet_pton_ipv4(p, addr);
+		return tfw_inet_pton_ipv4(p, &addr->v4);
 	if (mode == 6)
-		return tfw_inet_pton_ipv6(p, addr);
+		return tfw_inet_pton_ipv6(p, &addr->v6);
 
 	TFW_ERR("Can't parse address %s\n", *p);
 	return -EINVAL;
@@ -240,18 +248,21 @@ EXPORT_SYMBOL(tfw_inet_pton);
  * @buf must be MAX_ADDR_LEN bytes in size.
  */
 int
-tfw_inet_ntop(const void *addr, char *buf)
+tfw_inet_ntop(const TfwAddr *addr, char *buf)
 {
-	unsigned short family = *(unsigned short *)addr;
+	sa_family_t family;
+
+	validate_addr(addr);
+	family = addr->family;
 
 	if (family == AF_INET) {
-		const struct sockaddr_in *sa = addr;
+		const struct sockaddr_in *sa = &addr->v4;
 		unsigned char *a = (unsigned char *)&sa->sin_addr.s_addr;
 		snprintf(buf, MAX_ADDR_LEN, "%u.%u.%u.%u:%u",
 			 a[0], a[1], a[2], a[3], ntohs(sa->sin_port));
 	}
 	else if (family == AF_INET6) {
-		const struct sockaddr_in6 *sa = addr;
+		const struct sockaddr_in6 *sa = &addr->v6;
 		snprintf(buf, MAX_ADDR_LEN, "[%x:%x:%x:%x:%x:%x:%x:%x]:%u",
 			 ntohs(sa->sin6_addr.s6_addr16[0]),
 			 ntohs(sa->sin6_addr.s6_addr16[1]),
@@ -304,25 +315,43 @@ tfw_addr_eq_inet6(const struct sockaddr_in6 *a, const struct sockaddr_in6 *b)
  *         and scope IDs are equal.
  */
 bool
-tfw_addr_eq(const void *addr1, const void *addr2)
+tfw_addr_eq(const TfwAddr *addr1, const TfwAddr *addr2)
 {
-	unsigned short family1, family2;
+	sa_family_t family;
 
-	BUG_ON(!addr1 || !addr2);
+	validate_addr(addr1);
+	validate_addr(addr2);
 
-	family1 = *(unsigned short *)addr1;
-	family2 = *(unsigned short *)addr2;
-
-	if (family1 != family2)
+	if (addr1->family != addr2->family)
 		return false;
 
-	if (family1 == AF_INET) {
-		return tfw_addr_eq_inet(addr1, addr2);
-	} else if (family1 == AF_INET6) {
-		return tfw_addr_eq_inet6(addr1, addr2);
-	} else {
-		TFW_WARN("Can't compare address family: %u\n", family1);
-		return false;
-	}
+	family = addr1->family;
+
+	if (family == AF_INET)
+		return tfw_addr_eq_inet(&addr1->v4, &addr2->v4);
+
+	if (family == AF_INET6)
+		return tfw_addr_eq_inet6(&addr1->v6, &addr2->v6);
+
+	TFW_ERR("Bad address family: %u\n", family);
+	return false;
 }
 EXPORT_SYMBOL(tfw_addr_eq);
+
+int
+tfw_addr_sa_len(const TfwAddr *addr)
+{
+	sa_family_t family;
+
+	validate_addr(addr);
+	family = addr->family;
+
+	if (family == AF_INET)
+		return sizeof(addr->v4);
+
+	if (family == AF_INET6)
+		return sizeof(addr->v6);
+
+	TFW_ERR("Bad address family: %u\n", family);
+	return -1;
+}
