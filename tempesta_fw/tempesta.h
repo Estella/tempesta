@@ -26,6 +26,7 @@
 #include <linux/tempesta_fw.h>
 #include <net/sock.h>
 
+#include "addr.h"
 #include "tdb.h"
 
 #define TFW_AUTHOR		"NatSys Lab. (http://natsys-lab.com)"
@@ -41,13 +42,9 @@
 
 typedef struct {
 	int	count;
-	union {
-		struct sockaddr_in v4;
-		struct sockaddr_in6 v6;
-	}	addr[0];
+	TfwAddr addrs[0];
 } TfwAddrCfg;
-#define SIZE_OF_ADDR_CFG(n)	(sizeof(TfwAddrCfg) 			\
-				 + sizeof(struct sockaddr_in6) * (n))
+#define SIZE_OF_ADDR_CFG(n)	(sizeof(TfwAddrCfg) + sizeof(TfwAddr) * (n))
 
 /* Main configuration structure. */
 typedef struct {
@@ -70,6 +67,5 @@ int tfw_if_init(void);
 void tfw_if_exit(void);
 
 int tfw_reopen_listen_sockets(void);
-void tfw_sock_backend_refresh_cfg(void);
 
 #endif /* __TEMPESTA_H__ */

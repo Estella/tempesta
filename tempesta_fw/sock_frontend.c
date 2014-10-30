@@ -135,7 +135,7 @@ tfw_open_listen_sockets(void)
 		 */
 		proto = protos + listen_socks_n;
 		proto->type = TFW_FSM_HTTP;
-		addr = (struct sockaddr_in6 *)(tfw_cfg.listen->addr
+		addr = (struct sockaddr_in6 *)(tfw_cfg.listen->addrs
 					       + listen_socks_n);
 		r = __open_listen_socket(proto, addr);
 		if (r) {

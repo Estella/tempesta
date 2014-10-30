@@ -22,25 +22,27 @@
 
 #include <net/sock.h>
 #include "addr.h"
+#include "connection.h"
 #include "ptrset.h"
 #include "tempesta.h"
 
 #define TFW_SRV_STR_MAX_SIZE 100
 #define TFW_SRV_CONN_POOL_SIZE 8
 
-typedef TFW_PTRSET_STRUCT(struct sock *, TFW_SRV_CONN_POOL_SIZE) TfwSrvConnPool;
+typedef TFW_PTRSET_STRUCT(struct sock, TFW_SRV_CONN_POOL_SIZE) TfwSrvConnPool;
 
 typedef struct {
+	TfwPeer peer;
 	/* The server current stress (overloading) value. */
 	int		stress;
 	TfwAddr addr;
 	TfwSrvConnPool conn_pool;
 } TfwServer;
 
-TfwServer *tfw_server_alloc(const TfwAddr *addr);
-void tfw_server_free(TfwServer *srv);
+TfwServer *tfw_server_create(const TfwAddr *addr);
+void tfw_server_destroy(TfwServer *srv);
 
-TfwConnection *tfw_server_get_conn(TfwServer *srv);
+struct sock *tfw_server_get_conn(TfwServer *srv);
 
 
 int tfw_server_snprint(const TfwServer *srv, char *buf, size_t buf_size);

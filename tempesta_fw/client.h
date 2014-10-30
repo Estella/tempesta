@@ -20,12 +20,17 @@
 #ifndef __TFW_CLIENT_H__
 #define __TFW_CLIENT_H__
 
+#include "connection.h"
+
 typedef struct {
-	struct sock	*sock;
+	TfwPeer peer;	/* Generic interface for all peers, must be first. */
+
+	/* Connection to the client. Currently only single connection is
+	 * implemented. In future a client will have many connections. */
+	TfwConnection *conn;
 } TfwClient;
 
-TfwClient *tfw_create_client(struct sock *s);
-void tfw_destroy_client(struct sock *s);
+TfwClient *tfw_client_create(void);
 
 int tfw_client_init(void);
 void tfw_client_exit(void);

@@ -42,7 +42,7 @@ validate_srv(const TfwServer *srv)
 
 		tfw_ptrset_for_each(sk, i, &srv->conn_pool) {
 			conn = sk->sk_user_data;
-			BUG_ON(conn->hndl != srv);
+			BUG_ON(conn->peer != &srv->peer);
 			BUG_ON(sk->sk_socket->state == SS_FREE);
 		}
 	}
@@ -51,18 +51,16 @@ validate_srv(const TfwServer *srv)
 
 
 TfwServer *
-tfw_server_alloc(const TfwAddr *addr)
+tfw_server_create(const TfwAddr *addr)
 {
 	TfwServer *srv;
-	int i, r;
 
-	srv =  kmem_cache_alloc(srv_cache, GFP_ATOMIC);
+	srv =  kmem_cache_alloc(srv_cache, GFP_ATOMIC | __GFP_ZERO);
 	if (!srv) {
-		ERR("Can't allocate an ojbect from srv_cache\n");
+		TFW_ERR("Can't allocate an ojbect from srv_cache\n");
 		return NULL;
 	}
 
-	memset(srv, 0, sizeof(*srv));
 	srv->addr = *addr;
 
 	validate_srv(srv);
@@ -71,7 +69,7 @@ tfw_server_alloc(const TfwAddr *addr)
 }
 
 void
-tfw_server_free(TfwServer *srv)
+tfw_server_destroy(TfwServer *srv)
 {
 	struct sock *sk;
 	int i;
@@ -94,10 +92,10 @@ tfw_server_free(TfwServer *srv)
 	kmem_cache_free(srv_cache, srv);
 }
 
-TfwConnection *
+struct sock *
 tfw_server_get_conn(TfwServer *srv)
 {
-	tfw_ptrset_get_rr(&srv->conn_pool);
+	return tfw_ptrset_get_rr(&srv->conn_pool);
 }
 
 int

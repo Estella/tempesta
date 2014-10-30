@@ -80,11 +80,11 @@ init_addr(TfwAddrCfg **cfg_a, char *str, unsigned int addr,
 		return -ENOMEM;
 
 	(*cfg_a)->count = 1;
-	(*cfg_a)->addr[0].v4.sin_family = AF_INET;
-	(*cfg_a)->addr[0].v4.sin_addr.s_addr = htonl(addr);
-	(*cfg_a)->addr[0].v4.sin_port = htons(port);
+	(*cfg_a)->addrs[0].v4.sin_family = AF_INET;
+	(*cfg_a)->addrs[0].v4.sin_addr.s_addr = htonl(addr);
+	(*cfg_a)->addrs[0].v4.sin_port = htons(port);
 
-	r = tfw_inet_ntop((*cfg_a)->addr, str);
+	r = tfw_inet_ntop((*cfg_a)->addrs, str);
 	if (r) {
 		kfree(*cfg_a);
 		return r;
@@ -126,7 +126,7 @@ sysctl_addr(ctl_table *ctl, int write, void __user *buffer, size_t *lenp,
 
 		new_addr->count = r;
 		for (i = 0; i < new_addr->count; ++i) {
-			r = tfw_inet_pton(&p, new_addr->addr + i);
+			r = tfw_inet_pton(&p, &new_addr->addrs[i]);
 			if (r) {
 				kfree(new_addr);
 				kfree(tmp_buf);
@@ -165,7 +165,6 @@ static ctl_table tfw_ctl_main_tbl[] = {
 		.mode		= 0644,
 		.proc_handler	= sysctl_addr,
 		.extra1		= &tfw_cfg.backends,
-		.extra2		= tfw_sock_backend_refresh_cfg,
 	},
 	{ /* TODO reinitialize/destroy storage on setting/unsetting the var. */
 		.procname	= "cache_enable",

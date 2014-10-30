@@ -40,7 +40,7 @@ typedef TFW_PTRSET_STRUCT(void, 0) TfwPtrSet;
 
 #define __tfw_ptrset_cast(s) 	\
 ({				\
-	BUILD_BUG_ON(offsetof(typeof(s), ptrs) != offsetof(TfwPtrSet, ptrs)); \
+	BUILD_BUG_ON(offsetof(typeof(*(s)), ptrs) != offsetof(TfwPtrSet, ptrs)); \
 	((TfwPtrSet *)(s)); 	\
 })
 
@@ -65,7 +65,7 @@ typedef TFW_PTRSET_STRUCT(void, 0) TfwPtrSet;
 	__tfw_ptrset_init(__tfw_ptrset_cast(s), __tfw_ptrset_max(s))
 
 #define tfw_ptrset_get_rr(s) \
-	__tfw_ptrset_get_rr(__tfw_ptrset_cast(s))
+	__tfw_ptrset_get_rr(__tfw_ptrset_cast(s), __tfw_ptrset_max(s))
 
 
 static inline void

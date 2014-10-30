@@ -23,8 +23,9 @@
 #include <linux/list.h>
 #include <linux/rcupdate.h>
 
-#include "pool.h"
+#include "addr.h"
 #include "http.h"
+#include "pool.h"
 
 typedef enum {
 	TFW_HTTP_MATCH_F_NA = 0,

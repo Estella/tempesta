@@ -62,19 +62,19 @@ DECLARE_WAIT_QUEUE_HEAD(tfw_bconnd_wq);
 static bool tfw_bconnd_should_reconnect;
 
 
-static tfw_disconn_action_t
-reconnect_in_background(struct sock *sk)
+static tfw_conn_close_action_t
+reconnect_in_background(TfwConnection *conn)
 {
 	tfw_bconnd_should_reconnect = true;
 	wake_up(&tfw_bconnd_wq);
 
-	return TFW_DISCONN_RECONN;
+	return TFW_CONN_CLOSE_LEAVE;
 }
 
 static struct sock *
 create_connection(TfwServer *srv)
 {
-	static const struct {
+	static struct {
 		SsProto	_placeholder;
 		int	type;
 	} dummy_proto = {
@@ -83,9 +83,7 @@ create_connection(TfwServer *srv)
 
 	struct socket *sock;
 	struct sock *sk;
-	struct sockaddr *sa = &srv->addr->sa;
-	sa_family_t family = srv->addr->family;
-	int sa_len = tfw_addr_sa_len(&srv->addr);
+	sa_family_t family = srv->addr.family;
 	int r;
 
 
@@ -99,7 +97,7 @@ create_connection(TfwServer *srv)
 	sk->sk_user_data = &dummy_proto;
 	ss_set_callbacks(sk);
 
-	r = tfw_connection_new(sk, Conn_Srv, srv, reconnect_in_background);
+	r = tfw_connection_new(sk, Conn_Srv, &srv->peer, reconnect_in_background);
 	if (r) {
 		TFW_ERR("Can't create TfwConnection\n");
 		sock_release(sock);
@@ -116,7 +114,7 @@ create_srv_connections(TfwServer *srv)
 	int i, ret;
 
 	for (i = 0; i < TFW_BACKEND_CONN_N; ++i) {
-		sk = create_connection(&srv->addr);
+		sk = create_connection(srv);
 		BUG_ON(!sk);
 
 		ret = tfw_ptrset_add(&srv->conn_pool, sk);
@@ -125,7 +123,7 @@ create_srv_connections(TfwServer *srv)
 }
 
 static void
-create_backends_from_cfg()
+create_backends_from_cfg(void)
 {
 	int i, addr_count;
 	TfwAddrCfg *cfg;
@@ -138,7 +136,7 @@ create_backends_from_cfg()
 	addr_count = tfw_cfg.backends->count;
 
 	for (i = 0; i < addr_count; ++i) {
-		addr = &cfg->addr[i];
+		addr = &cfg->addrs[i];
 		srv = tfw_server_create(addr);
 		BUG_ON(!srv);
 
@@ -149,12 +147,11 @@ create_backends_from_cfg()
 }
 
 static void
-destroy_backends()
+destroy_backends(void)
 {
 	TfwServer *srv;
 	int srv_idx;
 	tfw_ptrset_for_each(srv, srv_idx, &backends) {
-		tfw_server_close_conns(srv);
 		tfw_server_destroy(srv);
 	}
 	tfw_ptrset_purge(&backends);
@@ -202,7 +199,7 @@ is_fully_connected(const TfwServer *srv)
 }
 
 static bool
-connect_all_backends()
+connect_all_backends(void)
 {
 	TfwServer *srv;
 	int srv_idx;

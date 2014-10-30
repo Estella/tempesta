@@ -39,15 +39,14 @@ static TfwConnHooks *conn_hooks[TFW_CONN_MAX_PROTOS];
  * ------------------------------------------------------------------------
  */
 static TfwConnection *
-tfw_connection_alloc(int type, void *handler)
+tfw_connection_alloc(void)
 {
 	TfwConnection *c = kmem_cache_alloc(conn_cache,
 					    GFP_ATOMIC | __GFP_ZERO);
 	if (!c)
 		return NULL;
 
-	TFW_CONN_TYPE(c) = type;
-	c->hndl = handler;
+	TFW_DBG("Allocated new connection: %p\n", c);
 
 	return c;
 }
@@ -57,18 +56,11 @@ tfw_connection_free(TfwConnection *c)
 {
 	TFW_DBG("Free connection: %p\n", c);
 
-	if (c->sess) {
-		/*
-		 * FIXME do we need to synchronize this?
-		 * If a connection can be processed from different CPUs, then we do.
-		 */
-		TfwConnection *peer_conn = tfw_connection_peer(c);
-		if (peer_conn) {
-			TFW_DBG("Detach from peer: %p\n", peer_conn);
-			peer_conn->sess = NULL;
-		}
-		tfw_session_free(c->sess);
-	}
+	/* Clear references to this connection. */
+	if (c->peer)
+		tfw_peer_detach_conn(c->peer, c);
+	if (c->sk)
+		c->sk->sk_user_data = NULL;
 
 	kmem_cache_free(conn_cache, c);
 }
@@ -82,17 +74,16 @@ tfw_connection_free(TfwConnection *c)
 /**
  * A downcall for new connection called to set necessary callbacks
  * when a traditional Sockets connect() is calling.
- *
- * @destructor Is a function placed to sk->sk_destruct.
- * The original callback is saved to TfwConnection->sk_destruct and the passed
- * function must call it manually.
  */
 int
-tfw_connection_new(struct sock *sk, int type, void *handler,
-		  void (*destructor)(struct sock *s))
+tfw_connection_new(struct sock *sk, tfw_conn_type_t type, TfwPeer *peer,
+		   tfw_conn_close_cb_t disconn_cb)
 {
 	TfwConnection *conn;
 	SsProto *proto = sk->sk_user_data;
+
+	TFW_DBG("New connection for sock: %p, type: %u, peer: %p\n",
+		sk, type, peer);
 
 	BUG_ON(!proto); /* parent socket protocol */
 	BUG_ON(type != Conn_Clnt && type != Conn_Srv);
@@ -100,17 +91,16 @@ tfw_connection_new(struct sock *sk, int type, void *handler,
 	/* Type: connection direction BitwiseOR protocol. */
 	type |= proto->type;
 
-	conn = tfw_connection_alloc(type, handler);
+	conn = tfw_connection_alloc();
 	if (!conn) {
 		TFW_ERR("Can't allocate a new connection\n");
 		/* TODO drop the connection. */
 		return -ENOMEM;
 	}
-
 	sk->sk_user_data = conn;
-
-	conn->sk_destruct = sk->sk_destruct;
-	sk->sk_destruct = destructor;
+	conn->sk = sk;
+	conn->proto.type = type;
+	tfw_peer_attach_conn(peer, conn);
 
 	sock_set_flag(sk, SOCK_DBG);
 
@@ -123,6 +113,7 @@ static int
 tfw_connection_close(struct sock *sk)
 {
 	TfwConnection *c = sk->sk_user_data;
+	tfw_conn_close_action_t action;
 
 	TFW_DBG("Close socket %p, conn=%p\n", sk, c);
 
@@ -133,19 +124,32 @@ tfw_connection_close(struct sock *sk)
 	if (tfw_classify_conn_close(sk) == TFW_BLOCK)
 		return -EPERM;
 
+	if (c->close_cb) {
+		action = c->close_cb(c);
+		if (action == TFW_CONN_CLOSE_LEAVE)
+			return 0;
+	}
+
 	conn_hooks[TFW_CONN_TYPE2IDX(TFW_CONN_TYPE(c))]->conn_destruct(c);
 
 	tfw_connection_free(c);
 
-	sk->sk_user_data = NULL;
+	return 0;
+}
+
+int
+tfw_conn_send_msg(TfwConnection *conn, TfwMsg *msg)
+{
+	ss_send(conn->sk, &msg->skb_list);
 
 	return 0;
 }
 
+
 void
 tfw_connection_send_cli(TfwSession *sess, TfwMsg *msg)
 {
-	ss_send(sess->cli->sock, &msg->skb_list);
+	ss_send(sess->cli_conn->sk, &msg->skb_list);
 }
 
 int
@@ -164,13 +168,12 @@ tfw_connection_send_srv(TfwSession *sess, TfwMsg *msg)
 	 */
 
 	if (tfw_session_sched_msg(sess, msg)) {
-		TFW_ERR("Cannot schedule message, msg=%p clnt=%p\n",
-			msg, sess->cli);
+		TFW_ERR("Cannot schedule message: %p\n", msg);
 		return -1;
 	}
 
 	/* Bind the server connection with the session. */
-	srv_conn = tfw_sess_conn(sess, Conn_Srv);
+	srv_conn = sess->srv_conn;
 	/*
 	 * Check that the server doesn't service somebody else.
 	 * FIXME when do we need to free the server session,
@@ -179,7 +182,7 @@ tfw_connection_send_srv(TfwSession *sess, TfwMsg *msg)
 	BUG_ON(srv_conn->sess && srv_conn->sess != sess);
 	srv_conn->sess = sess;
 
-	ss_send(sess->srv->sock, &msg->skb_list);
+	ss_send(sess->srv_conn->sk, &msg->skb_list);
 
 	return 0;
 }
@@ -189,6 +192,14 @@ tfw_connection_send_srv(TfwSession *sess, TfwMsg *msg)
  * 	Connection Upcalls
  * ------------------------------------------------------------------------
  */
+
+static tfw_conn_close_action_t tfw_disconn_client(TfwConnection *conn)
+{
+	tfw_peer_destroy(conn->peer);
+
+	return TFW_CONN_CLOSE_FREE;
+}
+
 /**
  * An upcall for new connection accepting.
  *
@@ -212,14 +223,14 @@ tfw_connection_new_upcall(struct sock *sk)
 	 * We have too lookup the client by the socket and create a new one
 	 * only if it's really new.
 	 */
-	cli = tfw_create_client(sk);
+	cli = tfw_client_create();
 	if (!cli) {
 		TFW_ERR("Can't allocate a new client");
 		ss_close(sk);
 		return -EINVAL;
 	}
 
-	tfw_connection_new(sk, Conn_Clnt, cli, tfw_destroy_client);
+	tfw_connection_new(sk, Conn_Clnt, &cli->peer, tfw_disconn_client);
 
 	TFW_DBG("New client socket %p (state=%u)\n", sk, sk->sk_state);
 
@@ -229,16 +240,16 @@ tfw_connection_new_upcall(struct sock *sk)
 static TfwSession *
 tfw_create_and_link_session(TfwConnection *cli_conn)
 {
-	TfwClient *cli = cli_conn->hndl;
 	TfwSession *sess;
 
-	sess = tfw_session_create(cli);
+	sess = tfw_session_create();
 	if (!sess)
 		return NULL;
 	BUG_ON(cli_conn->sess);
 
 	/* Bind current client connection with the session. */
 	cli_conn->sess = sess;
+	sess->cli_conn = cli_conn;
 
 	return sess;
 }
@@ -331,7 +342,7 @@ static SsHooks ssocket_hooks = {
  * ------------------------------------------------------------------------
  */
 void
-tfw_connection_hooks_register(TfwConnHooks *hooks, int type)
+tfw_connection_hooks_register(TfwConnHooks *hooks, tfw_conn_type_t type)
 {
 	unsigned hid = TFW_CONN_TYPE2IDX(type);
 

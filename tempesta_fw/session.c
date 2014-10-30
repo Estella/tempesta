@@ -37,31 +37,33 @@ tfw_session_sched_msg(TfwSession *s, TfwMsg *msg)
 		return -ENOENT;
 	}
 
-	s->srv = srv;
+	BUG(); /* fix this */
 
 	return 0;
 }
 
 TfwSession *
-tfw_session_create(TfwClient *cli)
+tfw_session_create(void)
 {
-	TfwSession *s = kmem_cache_alloc(sess_cache, GFP_ATOMIC);
-	if (!s)
+	TfwSession *s = kmem_cache_alloc(sess_cache, GFP_ATOMIC | __GFP_ZERO);
+	if (!s) {
+		TFW_ERR("Can't allocate object from sess_cache\n");
 		return NULL;
+	}
 
-	s->cli = cli;
-	s->srv = NULL;
 	INIT_LIST_HEAD(&s->req_list);
+
+	TFW_DBG("Created session: %p\n", s);
 
 	return s;
 }
 
 void
-tfw_session_free(TfwSession *s)
+tfw_session_destroy(TfwSession *s)
 {
 	TfwMsg *msg, *tmp;
 
-	TFW_DBG("Free session: %p\n", s);
+	TFW_DBG("Destroy session: %p\n", s);
 
 	/* Release all pipelined HTTP requests. */
 	list_for_each_entry_safe(msg, tmp, &s->req_list, pl_list) {

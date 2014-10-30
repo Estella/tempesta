@@ -46,6 +46,9 @@ MODULE_LICENSE("GPL");
 #define IP_ADDR_TEXT_BUF_SIZE 	32
 #define RULE_ARG_BUF_SIZE 	255
 
+typedef TFW_PTRSET_STRUCT(TfwAddr, MAX_SRV_PER_RULE) EntryAddrSet;
+typedef TFW_PTRSET_STRUCT(TfwServer, MAX_SRV_PER_RULE) EntrySrvSet;
+typedef TFW_PTRSET_STRUCT(TfwServer, TFW_SCHED_MAX_SERVERS) AddedSrvSet;
 
 /**
  * The structure may be used in two forms:
@@ -54,8 +57,8 @@ MODULE_LICENSE("GPL");
  */
 typedef struct {
 	union {
-		TfwPtrSet *servers; /* Contains TfwServer pointers. */
-		TfwPtrSet *addrs;   /* Contains TfwAddr pointers. */
+		EntrySrvSet  *servers; /* Contains TfwServer pointers. */
+		EntryAddrSet *addrs;   /* Contains TfwAddr pointers. */
 	};
 	TfwHttpMatchRule rule;
 } MatchEntry;
@@ -89,7 +92,7 @@ DEFINE_SPINLOCK(saved_rules_lock);
  * Allocated once upon module initialization (for fixed amount of servers).
  * Any access must be protected with the added_servers_lock.
  */
-static TfwPtrSet *added_servers;
+static AddedSrvSet added_servers;
 DEFINE_SPINLOCK(added_servers_lock);
 
 
@@ -103,23 +106,21 @@ DEFINE_SPINLOCK(added_servers_lock);
  * Allocate a set of TfwAddr or TfwServer pointers for placing it
  * into a MatchEntry.
  */
-static TfwPtrSet *
-alloc_ptrset(TfwPool *pool)
+static void *
+alloc_ptrset(TfwPool *pool, int size)
 {
-	size_t size = PTR_SET_SIZE(MAX_SRV_PER_RULE);
-	TfwPtrSet *servers = tfw_pool_alloc(pool, size);
+	EntrySrvSet *servers = tfw_pool_alloc(pool, size);
 	if (!servers) {
 		ERR("Can't allocate memory from pool: %p\n", pool);
 		return NULL;
 	}
 	memset(servers, 0, size);
-	servers->max = MAX_SRV_PER_RULE;
 
 	return servers;
 }
 
-#define alloc_servers(pool) alloc_ptrset(pool)
-#define alloc_addrs(pool) alloc_ptrset(pool)
+#define alloc_servers(pool) alloc_ptrset(pool, sizeof(EntrySrvSet))
+#define alloc_addrs(pool) alloc_ptrset(pool, sizeof(EntryAddrSet))
 
 /**
  * Resolve TfwAddr to TfwServer (using a set of servers added to the scheduler).
@@ -127,21 +128,14 @@ alloc_ptrset(TfwPool *pool)
 static TfwServer *
 resolve_addr(const TfwAddr *addr)
 {
-	int i, ret;
-	TfwAddr curr_addr;
+	int i;
 	TfwServer *curr_srv;
 	TfwServer *out_srv = NULL;
 
 	spin_lock_bh(&added_servers_lock);
 
-	for (i = 0; i < added_servers->n; ++i) {
-		curr_srv = added_servers->ptrs[i];
-
-		ret = tfw_server_get_addr(curr_srv, &curr_addr);
-		if (ret) {
-			LOG("Can't get address of the server: %p\n", curr_srv);
-		}
-		else if (tfw_addr_eq(addr, &curr_addr)) {
+	tfw_ptrset_for_each(curr_srv, i, &added_servers) {
+		if (tfw_addr_eq(addr, &curr_srv->addr)) {
 			out_srv = curr_srv;
 			break;
 		}
@@ -158,14 +152,13 @@ resolve_addr(const TfwAddr *addr)
  * Unresolved addresses are skipped.
  */
 static int
-resolve_addresses(TfwPtrSet *dst_servers, const TfwPtrSet *src_addrs)
+resolve_addresses(EntrySrvSet *dst_servers, const EntryAddrSet *src_addrs)
 {
 	int i, ret;
 	TfwAddr *addr;
 	TfwServer *srv;
 
-	for (i = 0; i < src_addrs->n; ++i) {
-		addr = src_addrs->ptrs[i];
+	tfw_ptrset_for_each(addr, i, src_addrs) {
 		srv = resolve_addr(addr);
 		if (srv) {
 			ret = tfw_ptrset_add(dst_servers, srv);
@@ -316,7 +309,7 @@ tfw_sched_http_add_srv(TfwServer *srv)
 	DBG("Adding server: %p\n", srv);
 
 	spin_lock_bh(&added_servers_lock);
-	ret = tfw_ptrset_add(added_servers, srv);
+	ret = tfw_ptrset_add(&added_servers, srv);
 	spin_unlock_bh(&added_servers_lock);
 
 	if (ret)
@@ -335,7 +328,7 @@ tfw_sched_http_del_srv(TfwServer *srv)
 	DBG("Deleting server: %p\n", srv);
 
 	spin_lock_bh(&added_servers_lock);
-	ret = tfw_ptrset_del(added_servers, srv);
+	ret = tfw_ptrset_del(&added_servers, srv);
 	spin_unlock_bh(&added_servers_lock);
 
 	if (ret)
@@ -767,38 +760,21 @@ tfw_sched_http_init(void)
 
 	LOG("init\n");
 
-	added_servers = kzalloc(PTR_SET_SIZE(TFW_SCHED_MAX_SERVERS),
-				GFP_KERNEL);
-	if (!added_servers) {
-		LOG("Can't allocate servers list\n");
-		ret = -ENOMEM;
-		goto err_alloc;
-	}
-	added_servers->max = TFW_SCHED_MAX_SERVERS;
-
 	sched_http_ctl = register_net_sysctl(&init_net, "net/tempesta",
 					     sched_http_ctl_tbl);
 	if (!sched_http_ctl) {
-		ret = -1;
 		LOG("Can't register the sysctl table\n");
-		goto err_sysctl_register;
+		return -1;
 	}
 
 	ret = tfw_sched_register(&tfw_sched_http_mod);
 	if (ret) {
 		LOG("Can't register the scheduler module\n");
-		ret = -1;
-		goto err_mod_register;
+		unregister_net_sysctl_table(sched_http_ctl);
+		return -1;
 	}
 
-	return ret;
-
-err_mod_register:
-	unregister_net_sysctl_table(sched_http_ctl);
-err_sysctl_register:
-	kfree(added_servers);
-err_alloc:
-	return ret;
+	return 0;
 }
 
 void
@@ -806,7 +782,6 @@ tfw_sched_http_exit(void)
 {
 	tfw_sched_unregister();
 	unregister_net_sysctl_table(sched_http_ctl);
-	kfree(added_servers);
 }
 
 module_init(tfw_sched_http_init);

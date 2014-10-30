@@ -26,9 +26,7 @@
 #include "msg.h"
 #include "session.h"
 
-#include "sync_socket.h"
-
-enum {
+typedef enum {
 	/* Protocol bits. */
 	__Conn_Bits	= 0x8,
 
@@ -38,28 +36,49 @@ enum {
 
 	Conn_HttpClnt	= Conn_Clnt | TFW_FSM_HTTP,
 	Conn_HttpSrv	= Conn_Srv | TFW_FSM_HTTP,
-};
+} tfw_conn_type_t;
 
 #define TFW_CONN_TYPE2IDX(t)	TFW_FSM_TYPE(t)
 
+typedef enum {
+	TFW_CONN_CLOSE_FREE,
+	TFW_CONN_CLOSE_LEAVE
+} tfw_conn_close_action_t;
+
+typedef struct TfwConnection TfwConnection;
+typedef struct TfwPeer TfwPeer;
+typedef struct TfwPeerOps TfwPeerOps;
+
+typedef tfw_conn_close_action_t (*tfw_conn_close_cb_t)(TfwConnection *conn);
+
 /* TODO backend connection could have many sessions. */
-typedef struct {
+struct TfwConnection {
 	/*
 	 * Stack of l5-l7 protocol handlers.
 	 * Base class, must be first.
 	 */
 	SsProto		proto;
 
-	TfwMsg		*msg;	/* currently processing (receiving) message */
-	void 		*hndl;	/* TfwClient or TfwServer handler */
-	TfwSession	*sess;	/* currently handled session */
+	struct sock	*sk;	/* Connection is a wrapper for this socket. */
+	TfwMsg		*msg;	/* Currently processing (receiving) message. */
+	TfwSession	*sess;
 
-	/* Original sk->sk_destruct. Destructors passed to tfw_connection_new()
-	 * must call it manually. */
-	void (*sk_destruct)(struct sock *sk);
-} TfwConnection;
+	TfwPeer *peer;			  /* TfwClient, TfwServer, etc. */
+	struct list_head peer_conn_list;  /* A peer has many connections. */
+
+	/* The callback decides what to do when a connection is closed by the
+	 * remote side: deallocate or leave as is (for further reconnection). */
+	tfw_conn_close_cb_t close_cb;
+};
 
 #define TFW_CONN_TYPE(c)	((c)->proto.type)
+
+/* Connection downcalls. */
+int tfw_connection_new(struct sock *sk, tfw_conn_type_t type, TfwPeer *peer,
+		       tfw_conn_close_cb_t disconn_cb);
+void tfw_connection_send_cli(TfwSession *sess, TfwMsg *msg);
+int tfw_connection_send_srv(TfwSession *sess, TfwMsg *msg);
+
 
 /* Callbacks used by l5-l7 protocols to operate on connection level. */
 typedef struct {
@@ -85,49 +104,40 @@ typedef struct {
 	TfwMsg * (*conn_msg_alloc)(TfwConnection *conn);
 } TfwConnHooks;
 
+void tfw_connection_hooks_register(TfwConnHooks *hooks, tfw_conn_type_t type);
 
-static inline TfwConnection *
-tfw_sess_conn(TfwSession *sess, int type)
+
+struct TfwPeer {
+	const TfwPeerOps *ops;
+};
+
+struct TfwPeerOps {
+	int (*peer_attach_conn)(TfwPeer *peer, TfwConnection *conn);
+	void (*peer_detach_conn)(TfwPeer *peer, TfwConnection *conn);
+	void (*peer_destroy)(TfwPeer *peer);
+};
+
+static inline int
+tfw_peer_attach_conn(TfwPeer *peer, TfwConnection *conn)
 {
-	if (type & Conn_Clnt) {
-		BUG_ON(!sess->cli);
-		return sess->cli->sock->sk_user_data;
-	}
-
-	if (type & Conn_Srv) {
-		if (!sess->srv)
-			return NULL;
-		return sess->srv->sock->sk_user_data;
-	}
-
-	BUG();
-	return NULL;
+	BUG_ON(!peer || !conn || !peer->ops->peer_attach_conn);
+	return peer->ops->peer_attach_conn(peer, conn);
 }
 
-static inline TfwConnection *
-tfw_connection_peer(TfwConnection *c)
+static inline void
+tfw_peer_detach_conn(TfwPeer *peer, TfwConnection *conn)
 {
-	if (TFW_CONN_TYPE(c) & Conn_Clnt) {
-		BUG_ON(!c->sess);
-		return tfw_sess_conn(c->sess, Conn_Srv);
-	}
-
-	if (TFW_CONN_TYPE(c) & Conn_Srv) {
-		if (!c->sess)
-			return NULL;
-		return tfw_sess_conn(c->sess, Conn_Clnt);
-	}
-
-	BUG();
-	return NULL;
+	BUG_ON(!peer || !conn || !peer->ops->peer_detach_conn);
+	peer->ops->peer_detach_conn(peer, conn);
 }
 
-/* Connection downcalls. */
-int tfw_connection_new(struct sock *sk, int type, void *handler,
-		       void (*destructor)(struct sock *s));
-void tfw_connection_send_cli(TfwSession *sess, TfwMsg *msg);
-int tfw_connection_send_srv(TfwSession *sess, TfwMsg *msg);
-
-void tfw_connection_hooks_register(TfwConnHooks *hooks, int type);
+static inline void
+tfw_peer_destroy(TfwPeer *peer)
+{
+	if (!peer)
+		return;
+	BUG_ON(!peer->ops->peer_destroy);
+	peer->ops->peer_destroy(peer);
+}
 
 #endif /* __TFW_CONNECTION_H__ */

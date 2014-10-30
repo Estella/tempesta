@@ -20,8 +20,9 @@
 #ifndef __TFW_SESSION_H__
 #define __TFW_SESSION_H__
 
-#include "client.h"
-#include "server.h"
+#include <linux/list.h>
+
+typedef struct TfwConnection TfwConnection;
 
 /**
  * Tempesta reuses server connections to handle many clients.
@@ -33,14 +34,16 @@
  * session.
  */
 typedef struct {
-	TfwServer	*srv;
-	TfwClient	*cli;
-	struct list_head req_list; /* list of pipelined requests */
+	TfwConnection *srv_conn;
+	TfwConnection *cli_conn;
+
+	struct list_head req_list; /* HTTP request pipeline. */
 } TfwSession;
 
+TfwSession *tfw_session_create(void);
+void tfw_session_destroy(TfwSession *s);
+void tfw_sess_detach_conn(TfwSession *s, TfwConnection *c);
 int tfw_session_sched_msg(TfwSession *s, TfwMsg *msg);
-TfwSession *tfw_session_create(TfwClient *cli);
-void tfw_session_free(TfwSession *s);
 
 int tfw_session_init(void);
 void tfw_session_exit(void);
